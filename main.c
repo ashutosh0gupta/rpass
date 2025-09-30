@@ -40,6 +40,9 @@
 #include <errno.h>
 #include <string.h>
 
+#define CAPTCHA_PROMPT "Type the string above:"
+#define OTP_PROMPT "Verification code:"
+
 enum program_return_codes {
     RETURN_NOERROR,
     RETURN_INVALID_ARGUMENTS,
@@ -69,7 +72,7 @@ struct {
 	int fd;
 	const char *password;
     } pwsrc;
-
+  const char *otp_filename;
     const char *pwprompt;
     int verbose;
 } args;
@@ -78,6 +81,7 @@ static void show_help()
 {
     printf("Usage: " PACKAGE_NAME " [-f|-d|-p|-e] [-hV] command parameters\n"
 	    "   -f filename   Take password to use from file\n"
+	    "   -s filename   Take OTP secret to use from file\n"
 	    "   -d number     Use number as file descriptor for getting password\n"
 	    "   -p password   Provide password as argument (security unwise)\n"
 	    "   -e            Password is passed as env-var \"SSHPASS\"\n"
@@ -104,7 +108,7 @@ static int parse_options( int argc, char *argv[] )
     fprintf(stderr, "Conflicting password source\n"); \
     error=RETURN_CONFLICTING_ARGUMENTS; }
 
-    while( (opt=getopt(argc, argv, "+f:d:p:P:heVv"))!=-1 && error==-1 ) {
+    while( (opt=getopt(argc, argv, "+f:d:p:P:s:heVv"))!=-1 && error==-1 ) {
 	switch( opt ) {
 	case 'f':
 	    // Password should come from a file
@@ -112,6 +116,13 @@ static int parse_options( int argc, char *argv[] )
 	    
 	    args.pwtype=PWT_FILE;
 	    args.pwsrc.filename=optarg;
+	    break;
+	case 's':
+	    // Password should come from a file
+	    /* VIRGIN_PWTYPE; */
+	    
+	    args.otp_filename=optarg;
+            
 	    break;
 	case 'd':
 	    // Password should come from an open file descriptor
@@ -376,6 +387,8 @@ int handleoutput( int fd )
     static int state1, state2;
     static int firsttime = 1;
     static const char *compare1=PASSWORD_PROMPT; // Asking for a password
+    static const char *comparec=CAPTCHA_PROMPT;  // Asking for captcha
+    static const char *compareo=OTP_PROMPT;      // Asking for OTP
     static const char compare2[]="The authenticity of host "; // Asks to authenticate host
     // static const char compare3[]="WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"; // Warns about man in the middle attack
     // The remote identification changed error is sent to stderr, not the tty, so we do not handle it.
@@ -415,6 +428,87 @@ int handleoutput( int fd )
 	    ret=RETURN_INCORRECT_PASSWORD;
 	}
     }
+
+    // ---------------------------
+    // Insert CAPTCHA
+    // ---------------------------
+    state1=match( comparec, buffer, numread, state1 );
+    if( comparec[state1]=='\0' ) {
+      if( args.verbose )
+        fprintf(stderr, "SSHPASS detected captcha prompt. Sending captcha string.\n");
+      char captcha[100];
+      int pos = 0;
+      int reading = 0;
+      for(int i = 0; i < numread; i++){
+        if( buffer[i] == '(' ) {
+          reading = 1;
+        }
+        if(reading) {
+          if( ( ('a'<= buffer[i]) && (buffer[i]<= 'z') ) ||
+              ( ('A'<= buffer[i]) && (buffer[i]<= 'Z') ) ) {
+            captcha[pos] = buffer[i];
+            pos++;
+          }
+        }
+        if( buffer[i] == ')' ) {
+          reading = 0;
+          captcha[pos] = '\0';
+          break;
+        }
+      }
+      /* printf("%d,%s,%s",pos,captcha,buffer); */
+      usleep(1000000);
+      write( fd, captcha, strlen( captcha ) );
+      write( fd, "\n", 1 );
+    }
+
+    // ---------------------------
+    // Insert CAPTCHA
+    // ---------------------------
+    state1=match( compareo, buffer, numread, state1 );
+    if( compareo[state1]=='\0' ) {
+      if( args.verbose )
+        fprintf(stderr, "SSHPASS detected OTP prompt. Sending OTP string.\n");
+      char otp[100];
+
+        FILE *fp;
+        char path[1035];
+
+        char cmd[200];
+        strcpy(cmd, "oathtool --totp -b ");
+        int srcfd=open(args.otp_filename, O_RDONLY );
+        int numread=read( srcfd, cmd+strlen(cmd), sizeof(cmd)-strlen(cmd) );
+        for(unsigned i=0; i < strlen(cmd); i++ ) {
+          if( cmd[i] == '\n'){
+            cmd[i] = '\0';
+            break;
+          }
+        }
+        close( srcfd );
+
+
+        fp = popen( cmd, "r" );
+        
+        /* Open the command for reading. */
+        if (fp == NULL) {
+          printf("Failed to run command\n" );
+          exit(1);
+        }
+
+        /* Read the output a line at a time - output it. */
+        while (fgets(path, sizeof(path), fp) != NULL) {
+          if( args.verbose ) {
+            printf("%s\n",cmd);
+            printf("%s\n", path);
+          }
+        }
+        usleep(1000000);
+        /* close */
+        pclose(fp);
+        write( fd, path, strlen( path ) );
+        /* write( fd, "\n", 1 ); */
+    }
+
 
     if( ret==0 ) {
         state2=match( compare2, buffer, numread, state2 );
